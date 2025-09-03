@@ -19,6 +19,7 @@ package tft
 
 import (
 	b64 "encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -248,7 +249,8 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 		tft.logger.Logf(tft.t, "Loading env vars from setup %s", tft.setupDir)
 		outputs := tft.getOutputs(tft.sensitiveOutputs(tft.setupDir))
 
-		if outputs, err = resolveProjectAndSAKey(outputs, tft.tfDir); err != nil {
+		moduleName := path.Base(utils.GetWD(tft.t))
+		if outputs, err = resolveProjectAndKey(outputs, moduleName); err != nil {
 			t.Fatalf("Failed to extract project_id and sa_key from setup outputs: %v", err)
 		}
 
@@ -457,11 +459,11 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 	return gjson.Parse(jsonString)
 }
 
-// resolveProjectAndSAKey takes the full map of test setup outputs, which can include
+// resolveProjectAndKey takes the full map of test setup outputs, which can include
 // multiple projects and service account keys, and returns a similar map with the
-// "project_ids" and "sa_keys" entries (if they exist) resolved to project and key
-// specific to the test we are currently running (represented by tfDir).
-func resolveProjectAndSAKey(outputs map[string]interface{}, tfDir string) (map[string]interface{}, error) {
+// "project_ids" and "sa_keys" entries (if they exist) resolved to project and
+// service account key specific to the module we are currently testing.
+func resolveProjectAndKey(outputs map[string]interface{}, moduleName string) (map[string]interface{}, error) {
 	resolved := make(map[string]interface{})
 
 	_, foundProjectID := outputs["project_id"]
@@ -469,21 +471,36 @@ func resolveProjectAndSAKey(outputs map[string]interface{}, tfDir string) (map[s
 	if foundProjectID && foundProjectIDs {
 		return nil, errors.New(`found both "project_id" and "project_ids" in outputs of test setup; cannot use both`)
 	}
-	_, foundSAKey := outputs["sa_key"]
-	_, foundSAKeys := outputs["sa_keys"]
-	if foundSAKey && foundSAKeys {
+	_, foundKey := outputs["sa_key"]
+	_, foundKeys := outputs["sa_keys"]
+	if foundKey && foundKeys {
 		return nil, errors.New(`found both "sa_key" and "sa_keys" in outputs of test setup; cannot use both`)
 	}
 
-	TODO: check details of tfDir, make it suitable for looking up in the maps below.
 	for k, v := range outputs {
-		switch(k) {
+		switch k {
 		case "project_ids":
-			...
-			resolved["project_id"] = ...
+			ids, ok := v.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("Wrong data type for 'project_ids', expected map[string]interface, got %T", v)
+			}
+
+			relevantProject, ok := ids[moduleName]
+			if !ok {
+				return nil, fmt.Errorf("Could not find key %q in 'project_ids', which was %v", moduleName, ids)
+			}
+			resolved["project_id"] = relevantProject
 		case "sa_keys":
-			...
-			resolved["sa_key"] = ...
+			ids, ok := v.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("Wrong data type for 'sa_keys', expected map[string]interface, got %T", v)
+			}
+
+			relevantKey, ok := ids[moduleName]
+			if !ok {
+				return nil, fmt.Errorf("Could not find key %q in 'sa_keys', which was %v", moduleName, ids)
+			}
+			resolved["sa_key"] = relevantKey
 		default:
 			resolved[k] = v
 		}
