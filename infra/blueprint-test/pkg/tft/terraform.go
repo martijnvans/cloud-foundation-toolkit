@@ -482,23 +482,23 @@ func resolveProjectAndKey(outputs map[string]interface{}, moduleName string) (ma
 		case "project_ids":
 			ids, ok := v.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf("Wrong data type for 'project_ids', expected map[string]interface, got %T", v)
+				return nil, fmt.Errorf("wrong data type for 'project_ids', expected map[string]interface, got %T", v)
 			}
 
 			relevantProject, ok := ids[moduleName]
 			if !ok {
-				return nil, fmt.Errorf("Could not find key %q in 'project_ids', which was %v", moduleName, ids)
+				return nil, fmt.Errorf("could not find key %q in 'project_ids', which was %v", moduleName, ids)
 			}
 			resolved["project_id"] = relevantProject
 		case "sa_keys":
 			ids, ok := v.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf("Wrong data type for 'sa_keys', expected map[string]interface, got %T", v)
+				return nil, fmt.Errorf("wrong data type for 'sa_keys', expected map[string]interface, got %T", v)
 			}
 
 			relevantKey, ok := ids[moduleName]
 			if !ok {
-				return nil, fmt.Errorf("Could not find key %q in 'sa_keys', which was %v", moduleName, ids)
+				return nil, fmt.Errorf("could not find key %q in 'sa_keys', which was %v", moduleName, ids)
 			}
 			resolved["sa_key"] = relevantKey
 		default:
