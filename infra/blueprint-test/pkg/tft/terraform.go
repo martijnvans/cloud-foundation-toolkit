@@ -19,10 +19,13 @@ package tft
 
 import (
 	b64 "encoding/base64"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	gotest "testing"
 	"time"
@@ -247,6 +250,27 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 	if tft.setupDir != "" {
 		tft.logger.Logf(tft.t, "Loading env vars from setup %s", tft.setupDir)
 		outputs := tft.getOutputs(tft.sensitiveOutputs(tft.setupDir))
+
+		// FIXME: this doesn't always work. Example:
+		//   tft.tfDir == /workspace/examples/multiple_buckets
+		// In this case, the below code tries to access a project created in setup for
+		// testing the "multiple_buckets" module, which doesn't exist. We need to somehow
+		// infer that this test is trying to exercise the "root" module and to run the test
+		// in project_ids["root"].
+		//
+		// Options include:
+		//  - renaming multiple_buckets -> root  :/
+		//  - adding a WithModuleMapping() option to tft.NewTFBlueprintTest()
+		//    and passing in something like { "multiple_buckets" => "root" } as needed
+		//  - looking at the module's "source" in examples/multiple_buckets/main.tf and
+		//    inferring that things like "terraform-google-modules/cloud-storage/google"
+		//    mean "root". Need to grapple with module-swapper cases too.
+		moduleName := path.Base(tft.tfDir)
+
+		if outputs, err = resolveProjectAndKey(outputs, moduleName); err != nil {
+			t.Fatalf("Failed to extract project_id and sa_key from setup outputs: %v", err)
+		}
+
 		loadTFEnvVar(tft.tfEnvVars, tft.getTFOutputsAsInputs(outputs))
 		if credsEnc, exists := tft.tfEnvVars[fmt.Sprintf("TF_VAR_%s", setupKeyOutputName)]; tft.saKey == "" && exists {
 			if credDec, err := b64.StdEncoding.DecodeString(credsEnc); err == nil {
@@ -450,6 +474,56 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 	}
 
 	return gjson.Parse(jsonString)
+}
+
+// resolveProjectAndKey takes the full map of test setup outputs, which can include
+// multiple projects and service account keys, and returns a similar map with the
+// "project_ids" and "sa_keys" entries (if they exist) resolved to project and
+// service account key specific to the module we are currently testing.
+func resolveProjectAndKey(outputs map[string]interface{}, moduleName string) (map[string]interface{}, error) {
+	resolved := make(map[string]interface{})
+
+	_, foundProjectID := outputs["project_id"]
+	_, foundProjectIDs := outputs["project_ids"]
+	if foundProjectID && foundProjectIDs {
+		return nil, errors.New(`found both "project_id" and "project_ids" in outputs of test setup; cannot use both`)
+	}
+	_, foundKey := outputs["sa_key"]
+	_, foundKeys := outputs["sa_keys"]
+	if foundKey && foundKeys {
+		return nil, errors.New(`found both "sa_key" and "sa_keys" in outputs of test setup; cannot use both`)
+	}
+
+	for k, v := range outputs {
+		switch k {
+		case "project_ids":
+			ids, ok := v.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("wrong data type for 'project_ids', expected map[string]interface, got %T", v)
+			}
+
+			relevantProject, ok := ids[moduleName]
+			if !ok {
+				return nil, fmt.Errorf("could not find key %q in 'project_ids', which had keys %v", moduleName, slices.Collect(maps.Keys(ids)))
+			}
+			resolved["project_id"] = relevantProject
+		case "sa_keys":
+			ids, ok := v.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("wrong data type for 'sa_keys', expected map[string]interface, got %T", v)
+			}
+
+			relevantKey, ok := ids[moduleName]
+			if !ok {
+				return nil, fmt.Errorf("could not find key %q in 'sa_keys', which had keys %v", moduleName, slices.Collect(maps.Keys(ids)))
+			}
+			resolved["sa_key"] = relevantKey
+		default:
+			resolved[k] = v
+		}
+	}
+
+	return resolved, nil
 }
 
 // loadTFEnvVar adds new env variables prefixed with TF_VAR_ to an existing map of variables.
