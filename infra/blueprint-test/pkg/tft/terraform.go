@@ -252,8 +252,21 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 		outputs := tft.getOutputs(tft.sensitiveOutputs(tft.setupDir))
 
 		// FIXME: this doesn't always work. Example:
-		// tft.tfDir ==
+		//   tft.tfDir == /workspace/examples/multiple_buckets
+		// In this case, the below code tries to access a project created in setup for
+		// testing the "multiple_buckets" module, which doesn't exist. We need to somehow
+		// infer that this test is trying to exercise the "root" module and to run the test
+		// in project_ids["root"].
+		//
+		// Options include:
+		//  - renaming multiple_buckets -> root  :/
+		//  - adding a WithModuleMapping() option to tft.NewTFBlueprintTest()
+		//    and passing in something like { "multiple_buckets" => "root" } as needed
+		//  - looking at the module's "source" in examples/multiple_buckets/main.tf and
+		//    inferring that things like "terraform-google-modules/cloud-storage/google"
+		//    mean "root". Need to grapple with module-swapper cases too.
 		moduleName := path.Base(tft.tfDir)
+
 		if outputs, err = resolveProjectAndKey(outputs, moduleName); err != nil {
 			t.Fatalf("Failed to extract project_id and sa_key from setup outputs: %v", err)
 		}
