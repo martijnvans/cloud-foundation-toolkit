@@ -21,9 +21,11 @@ import (
 	b64 "encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	gotest "testing"
 	"time"
@@ -249,7 +251,9 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 		tft.logger.Logf(tft.t, "Loading env vars from setup %s", tft.setupDir)
 		outputs := tft.getOutputs(tft.sensitiveOutputs(tft.setupDir))
 
-		moduleName := path.Base(utils.GetWD(tft.t))
+		// FIXME: this doesn't always work. Example:
+		// tft.tfDir ==
+		moduleName := path.Base(tft.tfDir)
 		if outputs, err = resolveProjectAndKey(outputs, moduleName); err != nil {
 			t.Fatalf("Failed to extract project_id and sa_key from setup outputs: %v", err)
 		}
@@ -487,7 +491,7 @@ func resolveProjectAndKey(outputs map[string]interface{}, moduleName string) (ma
 
 			relevantProject, ok := ids[moduleName]
 			if !ok {
-				return nil, fmt.Errorf("could not find key %q in 'project_ids', which was %v", moduleName, ids)
+				return nil, fmt.Errorf("could not find key %q in 'project_ids', which had keys %v", moduleName, slices.Collect(maps.Keys(ids)))
 			}
 			resolved["project_id"] = relevantProject
 		case "sa_keys":
@@ -498,7 +502,7 @@ func resolveProjectAndKey(outputs map[string]interface{}, moduleName string) (ma
 
 			relevantKey, ok := ids[moduleName]
 			if !ok {
-				return nil, fmt.Errorf("could not find key %q in 'sa_keys', which was %v", moduleName, ids)
+				return nil, fmt.Errorf("could not find key %q in 'sa_keys', which had keys %v", moduleName, slices.Collect(maps.Keys(ids)))
 			}
 			resolved["sa_key"] = relevantKey
 		default:
