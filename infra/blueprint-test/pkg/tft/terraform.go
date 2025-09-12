@@ -20,9 +20,11 @@ package tft
 import (
 	b64 "encoding/base64"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	gotest "testing"
 	"time"
@@ -41,8 +43,14 @@ import (
 
 const (
 	setupKeyOutputName    = "sa_key"
+	setupKeyMapOutputName = "sa_keys_per_module"
+
+	setupProjectOutputName    = "project_id"
+	setupProjectMapOutputName = "project_ids_per_module"
+
 	tftCacheMutexFilename = "bpt-tft-cache.lock"
 	planFilename          = "plan.tfplan"
+	rootModuleName        = "root"
 )
 
 var (
@@ -247,6 +255,16 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 	if tft.setupDir != "" {
 		tft.logger.Logf(tft.t, "Loading env vars from setup %s", tft.setupDir)
 		outputs := tft.getOutputs(tft.sensitiveOutputs(tft.setupDir))
+
+		referencedModules, err := findReferencedModules(tft.tfDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if outputs, err = resolveProjectAndKey(outputs, referencedModules); err != nil {
+			t.Fatalf("Failed to infer correct project_id and sa_key from setup outputs: %v", err)
+		}
+
 		loadTFEnvVar(tft.tfEnvVars, tft.getTFOutputsAsInputs(outputs))
 		if credsEnc, exists := tft.tfEnvVars[fmt.Sprintf("TF_VAR_%s", setupKeyOutputName)]; tft.saKey == "" && exists {
 			if credDec, err := b64.StdEncoding.DecodeString(credsEnc); err == nil {
@@ -450,6 +468,159 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 	}
 
 	return gjson.Parse(jsonString)
+}
+
+// findReferencedModules looks in tfDir and extracts the sources for all module
+// blocks in that directory.
+// The returned value is a set of module sources. Some possible examples:
+//
+//	"../.."
+//	"../../modules/bar"
+//	"terraform-google-modules/kubernetes-engine/google"
+//	"terraform-google-modules/kubernetes-engine/google//modules/workload-identity"
+func findReferencedModules(tfDir string) (map[string]struct{}, error) {
+	mod, diags := tfconfig.LoadModule(tfDir)
+	err := diags.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	sources := make(map[string]struct{})
+	for _, moduleBlock := range mod.ModuleCalls {
+		sources[moduleBlock.Source] = struct{}{}
+	}
+
+	return sources, nil
+}
+
+// fetchRelevantFromOutputs looks in the given map of terraform outputs for an
+// item indexed with `key` and `subkey`. It can be thought of as looking up
+// outputs[key][subkey]. Specifically, it returns:
+//
+//	key_present, item_if_present, error
+//
+// where it is considered OK for `key` to be missing from `outputs`, resulting
+// a return value of:
+//
+//	false, "", nil
+//
+// But it is considered an error if `subkey` is missing from `outputs[key]`.
+func fetchRelevantFromOutputs(outputs map[string]interface{}, key string, subkey string) (bool, string, error) {
+	val, found := outputs[key]
+	if !found {
+		return false, "", nil
+	}
+
+	subMap, ok := val.(map[string]interface{})
+	if !ok {
+		return false, "", fmt.Errorf("wrong data type for %q, expected map[string]interface, got %T", key, val)
+	}
+
+	relevantItem, ok := subMap[subkey]
+	if !ok {
+		return false, "", fmt.Errorf("could not find key %q in map %q, which had keys %v", subkey, key, slices.Collect(maps.Keys(subMap)))
+	}
+	relevantItemStr, ok := relevantItem.(string)
+	if !ok {
+		return false, "", fmt.Errorf("value for key %q in map %q, had type %T, expected string", subkey, key, relevantItem)
+	}
+	return true, relevantItemStr, nil
+}
+
+// findSingleLocalModule looks a the given set of module sources and returns
+// true if the set contains only one module and that module is sourced from
+// the same repo via a path starting with '../'. This relies on module-swapper
+// having been run first.
+// If this function returns true, it also sanitizes and returns the module
+// source. For example:
+//
+//	{ "../../modules/foo" } will return (true, "foo")
+//	{ "../.." } will return (true, "root")
+func findSingleLocalModule(modules map[string]struct{}) (bool, string, error) {
+	if len(modules) != 1 {
+		return false, "", nil
+	}
+	loneModule := ""
+	for module, _ := range modules {
+		loneModule = module
+		break
+	}
+	origModule := loneModule
+
+	if !strings.HasPrefix(loneModule, "../") {
+		// A non-local module.
+		return false, "", nil
+	}
+	for strings.HasPrefix(loneModule, "../") {
+		loneModule = strings.TrimPrefix(loneModule, "../")
+	}
+	if loneModule == "" || loneModule == ".." {
+		return true, rootModuleName, nil
+	}
+
+	loneModule, hadModulePrefix := strings.CutPrefix(loneModule, "modules/")
+	if !hadModulePrefix {
+		return false, "", fmt.Errorf("Unexpected local module path %q", origModule)
+	}
+	return true, loneModule, nil
+}
+
+// resolveProjectAndKey picks a specific project ID and service account key
+// to use, given the full map of the test setup outputs and a set of modules
+// referenced by the current tfDir.
+//
+// The test setup outputs are taken in as an argument and are not modified.
+// Instead, a "resolved" outputs map is returned.
+//
+// The outputs argument can include one or both of project_ids_per_module
+// and project_id, as well as one or both of sa_keys_per_module and sa_key.
+//
+// If the modules argument contains only one module and that module is local
+// to the same repo containing the test, then project_ids_per_module and
+// sa_keys_per_module are preferred. In that case, the module is used as the
+// lookup key for each of those maps and the values will be filled in to
+// resolved["project_id"] and resolved["sa_key"] respectively.
+//
+// In other cases, project_id_per_module and sa_keys_per_module are stripped
+// out since the split projects cannot be used.
+func resolveProjectAndKey(outputs map[string]interface{}, modules map[string]struct{}) (map[string]interface{}, error) {
+	// Copy everything from "outputs" into "resolved" as a starting point.
+	resolved := maps.Clone(outputs)
+
+	isSingleModule, loneModuleName, err := findSingleLocalModule(modules)
+	if err != nil {
+		return nil, err
+	}
+
+	if isSingleModule {
+		foundProjectIDMap, relevantProjectID, err := fetchRelevantFromOutputs(outputs, setupProjectMapOutputName, loneModuleName)
+		if err != nil {
+			return nil, err
+		}
+		if foundProjectIDMap {
+			// Note: this could override a prior setting for "project_id".
+			// This is OK because we know we are in a more specific setting where
+			// a) we know we are testing one specific module (loneModuleName), and
+			// b) project_ids_per_module has been supplied in outputs.
+			resolved[setupProjectOutputName] = relevantProjectID
+		}
+
+		foundKeyMap, relevantKey, err := fetchRelevantFromOutputs(outputs, setupKeyMapOutputName, loneModuleName)
+		if err != nil {
+			return nil, err
+		}
+		if foundKeyMap {
+			// Note: this could override a prior setting for "sa_key".
+			// This is OK for the same reasons as overriding "project_id" (see above).
+			resolved[setupKeyOutputName] = relevantKey
+		}
+	}
+
+	// Remove these outputs since their job is done.
+	delete(resolved, setupProjectMapOutputName)
+	delete(resolved, setupKeyMapOutputName)
+
+	return resolved, nil
 }
 
 // loadTFEnvVar adds new env variables prefixed with TF_VAR_ to an existing map of variables.
