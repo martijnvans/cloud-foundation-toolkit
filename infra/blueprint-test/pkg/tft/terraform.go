@@ -24,7 +24,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	gotest "testing"
@@ -51,7 +50,6 @@ const (
 
 	tftCacheMutexFilename = "bpt-tft-cache.lock"
 	planFilename          = "plan.tfplan"
-	rootModuleName        = "root"
 )
 
 var (
@@ -62,9 +60,6 @@ var (
 		// API activation is eventually consistent. Even if the google_project_service resource is reconciled there maybe an activation error.
 		".*SERVICE_DISABLED.*": "Required API not enabled.",
 	}
-
-	rootModuleRegex = regexp.MustCompile("^[./]*$")
-	modulesDirRegex = regexp.MustCompile("^[./]*/modules/(.+)$")
 )
 
 // TFBlueprintTest implements bpt.Blueprint and stores information associated with a Terraform blueprint test.
@@ -480,155 +475,6 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 	}
 
 	return gjson.Parse(jsonString)
-}
-
-// moduleName takes a module source string and extracts the short module name
-// used to refer to the module in test/setup/*.tf when per_module_{roles,services} are defined.
-//
-// The input is assumed to be a local module and this function will panic if it's not.
-func moduleName(moduleRef string) string {
-	if rootModuleRegex.MatchString(moduleRef) {
-		return rootModuleName
-	}
-
-	matches := modulesDirRegex.FindStringSubmatch(moduleRef)
-	if len(matches) < 2 {
-		// modulesDirRegex couldn't find a match even though this function is supposed to
-		// be called with local module references only.
-		panic(fmt.Sprintf("Couldn't extract module name from %q"))
-	}
-	return matches[1]
-}
-
-// isLocalModule uses terraform's definition of what a local module source looks like.
-func isLocalModule(moduleRef string) bool {
-	return strings.HasPrefix(moduleRef, "../") ||
-		strings.HasPrefix(moduleRef, "./") ||
-		strings.HasPrefix(moduleRef, "/")
-}
-
-// isModuleUnderTest looks at the given module source string and returns true
-// if it is the root module of this repo, or one of the modules inside the "modules/" dir.
-// This is done by just checking whether the moduleRef is a local filesystem path leading
-// up to the root and then potentially into the "modules/" dir.
-func isModuleUnderTest(moduleRef string) bool {
-	return isLocalModule(moduleRef) && (rootModuleRegex.MatchString(moduleRef) || modulesDirRegex.MatchString(moduleRef))
-}
-
-type stringSet = map[string]struct{}
-
-// nextPathsToVisit looks at the given mapping of
-// (module path) => (modules referenced from that path) and returns a set of
-// paths to visit next. External modules and "modules under test" are excluded
-// as they do not need further examination.
-func nextPathsToVisit(moduleRefs map[string]stringSet) stringSet {
-	nextPaths := make(stringSet)
-
-	for modulePath, refs := range moduleRefs {
-		for ref, _ := range refs {
-			if isLocalModule(ref) && !isModuleUnderTest(ref) {
-				nextPaths[filepath.Clean(filepath.Join(modulePath, ref))] = struct{}{}
-			}
-		}
-	}
-	return nextPaths
-}
-
-// stripAlreadySeen returns a new set that includes everything in "modulePaths"
-// that is not in "seen".
-func stripAlreadySeen(modulePaths stringSet, seen stringSet) stringSet {
-	newPaths := make(stringSet)
-
-	for path, _ := range modulePaths {
-		if _, ok := seen[path]; !ok {
-			newPaths[path] = struct{}{}
-		}
-	}
-	return newPaths
-}
-
-// findModulesUnderTest does a graph search starting from tfDir, looking
-// for any transitively referenced modules that are considered "modules under test",
-// which are modules in the "modules/" dir or the root module
-// (the exact definition is in isModuleUnderTest() above).
-//
-// Any external modules encountered are ignored.
-//
-// The search doesn't continue to unpack any module under test, so for example, if
-// modules/aaa sources modules/bbb, then only modules/aaa will be in the returned
-// set (unless modules/bbb is reachable from tfDir without going through modules/aaa).
-func findModulesUnderTest(tfDir string) (stringSet, error) {
-	tfDir = filepath.Clean(tfDir)
-
-	modulesUnderTest := make(stringSet)
-	pathsToVisit := stringSet{tfDir: struct{}{}}
-	seen := make(stringSet)
-
-	maxIters := 5
-	for iterations := 0; iterations < maxIters; iterations++ {
-		// moduleRefs is a map from filesystem path to a set of modules sourced from there.
-		moduleRefs, err := findAllReferencedModules(pathsToVisit)
-		if err != nil {
-			return nil, err
-		}
-
-		maps.Insert(seen, maps.All(pathsToVisit))
-
-		for _, refs := range moduleRefs {
-			for ref, _ := range refs {
-				if isModuleUnderTest(ref) {
-					modulesUnderTest[moduleName(ref)] = struct{}{}
-				}
-			}
-		}
-
-		pathsToVisit = stripAlreadySeen(nextPathsToVisit(moduleRefs), seen)
-
-		if len(pathsToVisit) == 0 {
-			return modulesUnderTest, nil
-		}
-	}
-
-	return nil, fmt.Errorf("Exceeded %v iterations when searching for referenced modules starting from %q, pathsToVisit is currently %v", maxIters, tfDir, pathsToVisit)
-}
-
-// findAllReferencedModules takes a set of filesystem paths for terraform modules
-// and returns a map from the path to a set of all modules referenced from that
-// module.
-func findAllReferencedModules(modulePaths stringSet) (map[string]stringSet, error) {
-	moduleRefs := make(map[string]stringSet)
-
-	for path, _ := range modulePaths {
-		modules, err := findReferencedModules(path)
-		if err != nil {
-			return nil, err
-		}
-		moduleRefs[path] = modules
-	}
-	return moduleRefs, nil
-}
-
-// findReferencedModules looks in tfDir and extracts the sources for all module
-// blocks in that directory.
-// The returned value is a set of module sources. Some possible examples:
-//
-//	"../.."
-//	"../../modules/bar"
-//	"terraform-google-modules/kubernetes-engine/google"
-//	"terraform-google-modules/kubernetes-engine/google//modules/workload-identity"
-func findReferencedModules(tfDir string) (stringSet, error) {
-	mod, diags := tfconfig.LoadModule(tfDir)
-	err := diags.Err()
-	if err != nil {
-		return nil, err
-	}
-
-	sources := make(stringSet)
-	for _, moduleBlock := range mod.ModuleCalls {
-		sources[moduleBlock.Source] = struct{}{}
-	}
-
-	return sources, nil
 }
 
 // fetchRelevantFromOutputs looks in the given map of terraform outputs for an
