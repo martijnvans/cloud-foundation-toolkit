@@ -127,7 +127,6 @@ type stringSet = map[string]struct{}
 // as they do not need further examination.
 func nextPathsToVisit(moduleRefs map[string]stringSet) stringSet {
 	nextPaths := make(stringSet)
-
 	for modulePath, refs := range moduleRefs {
 		for ref, _ := range refs {
 			if isLocalModule(ref) && !isModuleUnderTest(ref) {
@@ -142,7 +141,6 @@ func nextPathsToVisit(moduleRefs map[string]stringSet) stringSet {
 // that is not in "seen".
 func stripAlreadySeen(modulePaths stringSet, seen stringSet) stringSet {
 	newPaths := make(stringSet)
-
 	for path, _ := range modulePaths {
 		if _, ok := seen[path]; !ok {
 			newPaths[path] = struct{}{}
@@ -151,12 +149,11 @@ func stripAlreadySeen(modulePaths stringSet, seen stringSet) stringSet {
 	return newPaths
 }
 
-// findAllReferencedModules takes a set of filesystem paths for terraform modules
-// and returns a map from the path to a set of all modules referenced from that
-// module.
+// findAllReferencedModules takes a set of filesystem paths for terraform
+// modules and returns a map from the path to a set of all modules referenced
+// from the module at that path.
 func findAllReferencedModules(modulePaths stringSet) (map[string]stringSet, error) {
 	moduleRefs := make(map[string]stringSet)
-
 	for path, _ := range modulePaths {
 		modules, err := findReferencedModules(path)
 		if err != nil {
@@ -188,6 +185,5 @@ var findReferencedModules = func(tfDir string) (stringSet, error) {
 	for _, moduleBlock := range mod.ModuleCalls {
 		sources[moduleBlock.Source] = struct{}{}
 	}
-
 	return sources, nil
 }

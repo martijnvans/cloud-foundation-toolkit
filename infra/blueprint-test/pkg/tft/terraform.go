@@ -477,9 +477,8 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 	return gjson.Parse(jsonString)
 }
 
-// fetchRelevantFromOutputs looks in the given map of terraform outputs for an
-// item indexed with `key` and `subkey`. It can be thought of as looking up
-// outputs[key][subkey]. Specifically, it returns:
+// fetchRelevantFromOutputs looks in the given map of terraform outputs for
+// outputs[key][subkey]. It returns:
 //
 //	key_present, item_if_present, error
 //
@@ -488,7 +487,8 @@ func (b *TFBlueprintTest) GetTFSetupJsonOutput(key string) gjson.Result {
 //
 //	false, "", nil
 //
-// But it is considered an error if `subkey` is missing from `outputs[key]`.
+// But it is considered an error if `subkey` is missing from `outputs[key]` or
+// if outputs[key][subkey] is not a string.
 func fetchRelevantFromOutputs(outputs map[string]interface{}, key string, subkey string) (bool, string, error) {
 	val, found := outputs[key]
 	if !found {
