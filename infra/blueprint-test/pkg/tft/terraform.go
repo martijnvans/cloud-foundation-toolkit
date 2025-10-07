@@ -267,12 +267,15 @@ func NewTFBlueprintTest(t testing.TB, opts ...tftOption) *TFBlueprintTest {
 		// if available.
 		overrides, err := resolveProjectAndKey(outputs, modulesUnderTest)
 		if err != nil {
-			t.Fatalf("Failed to infer correct project_id and sa_key from setup outputs: %v", err)
+			t.Fatalf("Problem looking up overrides for project_id and sa_key from setup outputs: %v", err)
 		}
 		for k, v := range overrides {
-			tft.logger.Logf(tft.t, "Using inferred %s=%s from per-module isolation settings", k, v)
+			tft.logger.Logf(tft.t, "Overriding var %q from per-module isolation settings", k)
 			outputs[k] = v
 			tft.setupOutputOverrides[k] = v
+		}
+		if _, hasProjectID := outputs[setupProjectMapOutputName]; hasProjectID && len(modulesUnderTest) == 0 {
+			tft.logger.Logf(tft.t, `*** No local modules were transitively referenced from %q (did you forget to run module-swapper?) and no default project_id output var is available. A later "failed to find project_id" error is likely. ***`, tft.tfDir)
 		}
 
 		loadTFEnvVar(tft.tfEnvVars, tft.getTFOutputsAsInputs(outputs))
